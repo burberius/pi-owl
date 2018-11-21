@@ -23,6 +23,9 @@ import static org.quartz.JobBuilder.newJob;
 import static org.quartz.TriggerBuilder.newTrigger;
 
 public class Owl implements Job, GpioPinListenerDigital {
+    private static final int LONG_PRESS_MS = 1000;
+    private static final String RADIO_URL = "http://www.wdr.de/wdrlive/media/kiraka.m3u";
+
     private final GpioController gpio = GpioFactory.getInstance();
     private final DateFormat dateFormat = new SimpleDateFormat("H-m");
     private GpioPinDigitalInput button;
@@ -30,9 +33,10 @@ public class Owl implements Job, GpioPinListenerDigital {
     private GpioPinDigitalOutput rightEye;
     private final Random rand = new Random(System.currentTimeMillis());
     private boolean working;
-    private long last;
+    private long startButtonPress;
+    private long lastButtonPress;
 
-    private static boolean alarming;
+    private static boolean playingMp3;
     private static Process mp3Process;
 
     public void setup() throws SchedulerException {
@@ -60,65 +64,105 @@ public class Owl implements Job, GpioPinListenerDigital {
 
     public void execute(JobExecutionContext jobExecutionContext) {
         System.out.println("Alarm start");
-        Owl.alarming = true;
+        Owl.playingMp3 = true;
         playMp3("alarm.mp3");
         try {
             Owl.mp3Process.waitFor();
         } catch (InterruptedException e) {
         }
-        Owl.alarming = false;
+        Owl.playingMp3 = false;
         System.out.println("Alarm end");
     }
 
     public void handleGpioPinDigitalStateChangeEvent(final GpioPinDigitalStateChangeEvent event) {
-        if (event.getState() == PinState.HIGH || working == true) {
+        if (event.getState() == PinState.LOW || working == true) {
+            startButtonPress = System.currentTimeMillis();
             return;
         }
-        if(Owl.alarming) {
-            System.out.println("Alarm stop");
-            Owl.mp3Process.destroy();
-            Owl.alarming = false;
-            return;
-        }
-        working = true;
         try {
-            if (System.currentTimeMillis() - last < 5000) {
+            if(Owl.playingMp3) {
+                stopMp3();
+                return;
+            }
+            working = true;
+
+            if (System.currentTimeMillis() - lastButtonPress < 5000) {
                 playMp3("ungeduld.mp3");
                 bothEyesBlink(1000);
             } else {
-                last = System.currentTimeMillis();
-                final int number = rand.nextInt(5);
-                playMp3(dateFormat.format(new Date()) + ".mp3");
-
-                switch (number) {
-                case 0:
-                    bothEyes(1000);
-                    break;
-                case 1:
-                    bothEyesBlink(1000);
-                    break;
-                case 2:
-                    leftEyeBlink(1000);
-                    break;
-                case 3:
-                    rightEyeBlink(1000);
-                    break;
-                case 4:
-                    leftRightEyeBlink(1000);
-                    break;
-                default:
-                    System.out.println("Random: " + number);
-                    break;
+                lastButtonPress = System.currentTimeMillis();
+                long pressTime = System.currentTimeMillis() - startButtonPress;
+                if (pressTime < LONG_PRESS_MS) {
+                    tellTime();
+                } else {
+                    startRadio();
                 }
-
             }
         } catch (final InterruptedException e) {
         }
         working = false;
     }
 
+    private void stopMp3() throws InterruptedException {
+        System.out.println("Stop playing mp3");
+        Owl.mp3Process.destroy();
+        Thread.sleep(20);
+        if(Owl.mp3Process.isAlive()) {
+            System.out.println("Still alive!");
+            Owl.mp3Process.destroyForcibly();
+            System.out.println("And now " + Owl.mp3Process.isAlive());
+
+        }
+        Owl.playingMp3 = false;
+    }
+
+    private void tellTime() throws InterruptedException {
+        System.out.println("Tell time");
+        final int number = rand.nextInt(5);
+        playMp3(dateFormat.format(new Date()) + ".mp3");
+
+        switch (number) {
+        case 0:
+            bothEyes(1000);
+            break;
+        case 1:
+            bothEyesBlink(1000);
+            break;
+        case 2:
+            leftEyeBlink(1000);
+            break;
+        case 3:
+            rightEyeBlink(1000);
+            break;
+        case 4:
+            leftRightEyeBlink(1000);
+            break;
+        default:
+            System.out.println("Random: " + number);
+            break;
+        }
+    }
+
+    private void startRadio() {
+        System.out.println("Start radio");
+        Owl.playingMp3 = true;
+        playMp3(RADIO_URL);
+        new Thread(() -> {
+            try {
+                eyeMove(500);
+            } catch (InterruptedException e) {
+            }
+        }).start();
+    }
+
     private void playMp3(final String mp3) {
-        final ProcessBuilder builder = new ProcessBuilder("mpg123", mp3, ">", "/dev/null");
+        ProcessBuilder builder;
+        if(mp3.endsWith("m3u")) {
+            builder = new ProcessBuilder("mpg123", "-@", mp3, ">", "/dev/null");
+            builder.inheritIO();
+        } else {
+            builder = new ProcessBuilder("mpg123", mp3, ">", "/dev/null");
+        }
         try {
             Owl.mp3Process = builder.start();
         } catch (final IOException e) {
@@ -164,6 +208,22 @@ public class Owl implements Job, GpioPinListenerDigital {
             leftEye.pulse(milis, true);
             rightEye.pulse(milis, true);
         }
+    }
+
+    private void eyeMove(final int milis) throws InterruptedException {
+        leftEye.high();
+        Thread.sleep(milis);
+        while (Owl.mp3Process.isAlive()) {
+            rightEye.high();
+            Thread.sleep(milis);
+            leftEye.low();
+            Thread.sleep(milis);
+            leftEye.high();
+            Thread.sleep(milis);
+            rightEye.low();
+            Thread.sleep(milis);
+        }
+        leftEye.low();
     }
 
     public static void main(final String... args) throws InterruptedException, SchedulerException {
